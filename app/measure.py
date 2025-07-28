@@ -2,7 +2,7 @@
 """
 Author: Nina Belyavskaya
 """
-from models import Device, Metric
+from .models import Device, Metric
 
 def mock(metric: Metric, device: Device) -> float:
     """

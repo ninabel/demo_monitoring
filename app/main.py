@@ -7,9 +7,9 @@ from contextlib import asynccontextmanager
 import asyncio
 
 from fastapi import FastAPI, HTTPException, status, Depends
-from models import Device, Metric, Site, DeviceType, Measure
-from measure import mock
-from db import AsyncSession, create_db_and_tables, get_async_session, async_session_maker
+from .models import Device, Metric, Site, DeviceType, Measure
+from .measure import mock
+from .db import AsyncSession, create_db_and_tables, get_async_session, async_session_maker
 from sqlmodel import select
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timezone
@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI):
     await create_db_and_tables()
     yield
 
-app = FastAPI(title="Device Monitoring API")
+app = FastAPI(title="Device Monitoring API", lifespan=lifespan)
 
 
 async def measure_devices():
