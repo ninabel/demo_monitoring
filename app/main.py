@@ -7,7 +7,13 @@ from contextlib import asynccontextmanager
 import asyncio
 
 from fastapi import FastAPI, HTTPException, status, Depends
-from .models import Device, Metric, Site, DeviceType, Measure
+from .models import (
+    Device, DeviceShort, DeviceView,
+    Metric, MetricShort, 
+    Site, SiteShort, SiteView, 
+    DeviceType, DeviceTypeShort, DeviceTypeView,
+    Measure, LastMeasure, MeasureShort, MeasuresHistory
+)
 from .measure import mock
 from .db import AsyncSession, create_db_and_tables, get_async_session, async_session_maker
 from sqlmodel import select
@@ -18,6 +24,10 @@ from sqlalchemy.orm import selectinload
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Lifespan event handler to create the database and tables at startup.
+    This function is called when the FastAPI application starts.
+    """
     await create_db_and_tables()
     yield
 
@@ -53,6 +63,10 @@ async def measure_devices():
     logger.info("Measurement of devices completed")
 
 def measure_devices_job():
+    """
+    Job to run the measure_devices function periodically.
+    This function is called by the scheduler.
+    """
     asyncio.run(measure_devices())
 
 # Initialize the scheduler to run measure_devices every 30 seconds
@@ -60,45 +74,62 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(measure_devices_job, 'interval', seconds=180)
 scheduler.start()
 
-@app.get("/")
-# main page with all sites
-async def sites(session: AsyncSession = Depends(get_async_session)):
+@app.get("/", response_model=dict|list[SiteShort])
+# return string if sitelist is empty or SiteList with links to sites
+async def sites(session: AsyncSession = Depends(get_async_session)): 
+    """
+    Main page that lists all sites.
+    """
     res = await session.execute(select(Site))
     sites = res.scalars().all()
     if not sites:
         print("The system is empty, please create a site first.")
         return {"message": "The system is empty, please create a site first."}
-    return [{"id": site.id, "name": site.name, "link": f"/site/{site.id}"} for site in sites]
+    return [SiteShort(
+        id=site.id, name=site.name, link=site.link
+        ) for site in sites]
 
-@app.get("/site/{id}")
+@app.get("/site/{id}", response_model=SiteView)
 # site details with its devices
 async def site_page(id: int, session: AsyncSession = Depends(get_async_session)):
+    """
+    Get details of a specific site by its ID.
+    This endpoint returns the site information along with its devices and their types.
+    """
     res = await session.execute(select(Site).options(
             selectinload(Site.devices).selectinload(Device.device_type)
         ).where(Site.id==id))
     site = res.scalar_one_or_none()
     if not site:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
-    return {"id": site.id, "name": site.name,
-            "link": f"/site/{site.id}",
-            "devices": [
-                 {"id": device.id, "name": device.name, "device_type": device.device_type.name,
-                  "link": f"/device/{device.id}"} for device in site.devices
-                 ] if site.devices else []
-            }
+    return SiteView(
+        id=site.id,
+        name=site.name,
+        devices=[DeviceShort(
+            id=device.id, name=device.name, link=device.link,    
+        ) for device in site.devices]
+     ) if site.devices else []
 
-@app.post("/site/")
+@app.post("/site/", response_model=Site)
 # create new site
-async def site_new(site_data: Site, session: AsyncSession = Depends(get_async_session)):
-    session.add(site_data)
+async def site_new(site: Site, session: AsyncSession = Depends(get_async_session)):
+    """
+    Create a new site.
+    This endpoint allows you to create a new site with a unique name.
+    """
+    session.add(site)
     await session.commit()
-    session.refresh(site_data)
-    return site_data
+    session.refresh(site)
+    return site
 
-@app.post("/site/{id}")
+@app.post("/site/{id}", response_model=Site)
 # edit site
 async def site_edit(id: int, 
                     site_data: Site, session: AsyncSession = Depends(get_async_session)):
+    """
+    Edit an existing site by its ID.
+    This endpoint allows you to update the name of a site.
+    """
     res = await session.execute(select(Site).where(Site.id==id))
     site = res.scalar_one_or_none()
     if not site:
@@ -108,9 +139,13 @@ async def site_edit(id: int,
     session.refresh(site)
     return site
 
-@app.delete("/site/{id}")
+@app.delete("/site/{id}", response_model=dict)
 # delete site with its devices
 async def site_delete(id: int, session: AsyncSession = Depends(get_async_session)):
+    """
+    Delete a site by its ID.
+    This endpoint removes the site and all associated devices.
+    """
     res = await session.execute(select(Site).where(Site.id==id))
     site = res.scalar_one_or_none()
     if not site:
@@ -119,40 +154,57 @@ async def site_delete(id: int, session: AsyncSession = Depends(get_async_session
     await session.commit()
     return {"ok": True, "message": f"Site {site.name} deleted"}
 
-@app.get("/device_types/")
+@app.get("/device_types/", response_model=list[DeviceTypeShort])
 # all device types
 async def device_types(session: AsyncSession = Depends(get_async_session)):
+    """Get a list of all device types.
+    This endpoint returns all device types available in the system.
+    """
     res = await session.execute(select(DeviceType))
     device_types = res.scalars().all()
-    return [{"id": dt.id, "name": dt.name, "link": f"/device_type/{dt.id}"} for dt in device_types]
+    return [
+        DeviceTypeShort(
+            id=dt.id, name=dt.name, link=dt.link
+        ) for dt in device_types]
 
-@app.get("/device_type/{id}")
+@app.get("/device_type/{id}", response_model=DeviceTypeView)
 # device_type with its metrics
 async def device_type_page(id: int, session: AsyncSession = Depends(get_async_session)):
+    """
+    Get details of a specific device type by its ID.
+    This endpoint returns the device type information along with its metrics.
+    """
     res = await session.execute(select(DeviceType).options(
         selectinload(DeviceType.metrics)
     ).where(DeviceType.id==id))
     device_type = res.scalar_one_or_none()
     if not device_type:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device Type not found")
-    return {"id": device_type.id, "name": device_type.name,
-            "link": f"/device_type/{device_type.id}",
-            "metrics": [
-                {"id": metric.id, "name": metric.name, "unit": metric.unit, "call": metric.call}
-                for metric in device_type.metrics
-            ] if device_type.metrics else []}
+    return DeviceTypeView(id=device_type.id, name=device_type.name,
+            link=device_type.link,
+            # Include metrics if they exist",
+            metrics=[MetricShort(
+                id=metric.id, name=metric.name, unit=metric.unit, 
+                link=metric.link
+            ) for metric in device_type.metrics]
+            if device_type.metrics else [])
 
-@app.post("/device_type/")
+@app.post("/device_type/", response_model=DeviceType)
+# create new device type
 async def device_type_new(device_type: DeviceType, session: AsyncSession = Depends(get_async_session)):
     session.add(device_type)
     await session.commit()
     session.refresh(device_type)
     return device_type
 
-@app.post("/device_type/{id}")
-# create new or edit site
+@app.post("/device_type/{id}", response_model=DeviceType)
+# create new or edit device type
 async def device_type_edit(id: int,
                      device_type_data: DeviceType, session: AsyncSession = Depends(get_async_session)):
+    """
+    Edit an existing device type by its ID.
+    This endpoint allows you to update the name of a device type.
+    """    
     res = await session.execute(select(DeviceType).where(DeviceType.id==id))
     device_type = res.scalar_one_or_none()
     if not device_type:
@@ -162,9 +214,13 @@ async def device_type_edit(id: int,
     session.refresh(device_type)
     return device_type
 
-@app.post("/device_type/{id}/add_metric/{metric_id}")
+@app.post("/device_type/{id}/add_metric/{metric_id}", response_model=DeviceTypeView)
 # add metric to device type
 async def device_type_add_metric(id: int, metric_id: int, session: AsyncSession = Depends(get_async_session)):
+    """Add a metric to a device type.
+    This endpoint associates a metric with a device type by their IDs.
+    If the metric is already associated, it raises an error.
+    """
     res = await session.execute(select(DeviceType).options(
         selectinload(DeviceType.metrics)
     ).where(DeviceType.id==id))
@@ -180,19 +236,24 @@ async def device_type_add_metric(id: int, metric_id: int, session: AsyncSession 
     device_type.metrics.append(metric)
     await session.commit()
     session.refresh(device_type)
-    return {
-        "id": device_type.id,
-        "name": device_type.name,
-        "link": f"/device_type/{device_type.id}",
-        "metrics": [
-            {"id": metric.id, "name": metric.name, "unit": metric.unit, "call": metric.call}
-            for metric in device_type.metrics
+    return DeviceTypeView(
+        id=device_type.id,
+        name=device_type.name,
+        link=device_type.link,
+        metrics=[MetricShort(
+            id=metric.id, name=metric.name, unit=metric.unit,
+            link=metric.link
+            ) for metric in device_type.metrics
         ]
-    }
+    )
 
-@app.post("/device_type/{id}/remove_metric/{metric_id}")
+@app.post("/device_type/{id}/remove_metric/{metric_id}", response_model=DeviceTypeView)
 # remove metric from device type
 async def device_type_remove_metric(id: int, metric_id: int, session: AsyncSession = Depends(get_async_session)):
+    """Remove a metric from a device type.
+    This endpoint disassociates a metric from a device type by their IDs.
+    If the metric is not associated with the device type, it raises an error.
+    """
     res = await session.execute(select(DeviceType).options(
         selectinload(DeviceType.metrics)
     ).where(DeviceType.id==id))
@@ -208,19 +269,24 @@ async def device_type_remove_metric(id: int, metric_id: int, session: AsyncSessi
     device_type.metrics.remove(metric)
     await session.commit()
     session.refresh(device_type)
-    return {
-        "id": device_type.id,
-        "name": device_type.name,
-        "link": f"/device_type/{device_type.id}",
-        "metrics": [
-            {"id": metric.id, "name": metric.name, "unit": metric.unit, "call": metric.call}
-            for metric in device_type.metrics
+    return DeviceTypeView(
+        id=device_type.id,
+        name=device_type.name,
+        link=device_type.link,
+        metrics=[MetricShort(
+            id=metric.id, name=metric.name, unit=metric.unit,
+            link=metric.link
+            ) for metric in device_type.metrics
         ]
-    }
+    )
 
-@app.delete("/device_type/{id}")
+
+@app.delete("/device_type/{id}", response_model=dict)
 # delete device_type
 async def device_type_delete(id: int, session: AsyncSession = Depends(get_async_session)):
+    """Delete a device type by its ID.
+    This endpoint removes the device type and all associated devices.
+    """
     res = await session.execute(select(DeviceType).where(DeviceType.id==id))
     device_type = res.scalar_one_or_none()
     if not device_type:
@@ -229,7 +295,7 @@ async def device_type_delete(id: int, session: AsyncSession = Depends(get_async_
     await session.commit()
     return {"ok": True, "message": f"Device Type {device_type.name} deleted"}
 
-@app.get("/device/{id}")
+@app.get("/device/{id}", response_model=DeviceView)
 # device, its site and device_type with last metrics
 async def device(id: int, session: AsyncSession = Depends(get_async_session)):
     res = await session.execute(select(Device).options(
@@ -254,31 +320,35 @@ async def device(id: int, session: AsyncSession = Depends(get_async_session)):
         if measure.metric_id not in last_measures:
             last_measures[measure.metric_id] = measure
 
-    return {
-        "id": device.id,
-        "name": device.name,
-        "link": f"/device/{device.id}",
-        "is_active": device.is_active,
-        "site": {"id": device.site.id, "name": device.site.name,
-                 "link": f"/site/{device.site.id}"},
-        "device_type": {"id": device.device_type.id, "name": device.device_type.name,
-                        "link": f"/device_type/{device.device_type.id}"},
-        "last_measures": [
-            {
-                "timestamp": measure.timestamp,
-                "metric_id": measure.metric_id,
-                "metric_name": measure.metric.name,
-                "value": measure.value,
-                "unit": measure.metric.unit,
-                "link": f"/history/{device.id}/{measure.metric_id}"
-            }
+    return DeviceView(
+        id=device.id,
+        name=device.name,
+        link=device.link,
+        is_active=device.is_active,
+        site=SiteShort(
+            id=device.site.id, name=device.site.name, link=device.site.link
+        ),
+        device_type=DeviceTypeShort(
+            id=device.device_type.id, name=device.device_type.name, link=device.device_type.link
+        ),
+        last_measures=[LastMeasure(
+                timestamp=measure.timestamp,
+                metric=measure.metric.name,
+                value=measure.value,
+                unit=measure.metric.unit,
+                link=f"/history/{device.id}/{measure.metric_id}"
+            )
             for measure in last_measures.values()
-        ],
-}
+        ])
 
-@app.post("/device/device_type/{device_type_id}/site/{site_id}")
+
+@app.post("/device/device_type/{device_type_id}/site/{site_id}", response_model=Device)
 # create new device
 async def device_new(device: Device, device_type_id: int, site_id:int, session: AsyncSession = Depends(get_async_session)):
+    """Create a new device associated with a device type and site.
+    This endpoint allows you to create a new device with a unique name, device type, and site.
+    If the device type or site does not exist, it raises an error.
+    """
     res = await session.execute(select(DeviceType).where(DeviceType.id==id))
     device_type = res.scalar_one_or_none()
     if not device_type:
@@ -296,10 +366,14 @@ async def device_new(device: Device, device_type_id: int, site_id:int, session: 
     session.refresh(device)
     return device
  
-@app.post("/device/{id}")
+@app.post("/device/{id}", response_model=Device)
 # edit device
 async def device_edit(id: int,
                      device_data: Device, session: AsyncSession = Depends(get_async_session)):
+    """Edit an existing device by its ID.
+    This endpoint allows you to update the name, site, and device type of a device.
+    If the device does not exist, it raises an error.
+    """
     res = await session.execute(select(Device).where(Device.id==id))
     device = res.scalar_one_or_none()
     if not device:
@@ -320,9 +394,13 @@ async def device_edit(id: int,
     session.refresh(device)
     return device
 
-@app.delete("/device/{id}")
+@app.delete("/device/{id}", response_model=dict)
 # delete device
 async def device_delete(id: int, session: AsyncSession = Depends(get_async_session)):
+    """Delete a device by its ID.
+    This endpoint removes the device and all associated measures.
+    If the device does not exist, it raises an error.
+    """
     res = await session.execute(select(Device).where(Device.id==id))
     device = res.scalar_one_or_none()
     if not device:
@@ -332,43 +410,50 @@ async def device_delete(id: int, session: AsyncSession = Depends(get_async_sessi
     return {"ok": True, "message": f"Device {device.name} deleted"}
     
 
-@app.get("/metrics/")
+@app.get("/metrics/", response_model=list[MetricShort])
 # all metrics
 async def metrics(session: AsyncSession = Depends(get_async_session)):
+    """
+    Get a list of all metrics.
+    This endpoint returns all metrics available in the system.
+    """
     res = await session.execute(select(Metric))
     metrics = res.scalars().all()
-    return [
-        {"id": metric.id, "name": metric.name, "unit": metric.unit, "call": metric.call,
-         "link": f"/metric/{metric.id}"}
-        for metric in metrics
-    ]
+    return [MetricShort(
+        id=metric.id, name=metric.name, unit=metric.unit, link=metric.link
+    ) for metric in metrics]
 
-@app.get("/metric/{id}")
+@app.get("/metric/{id}", response_model=Metric)
 # metric details
 async def metric(id: int, session: AsyncSession = Depends(get_async_session)):
+    """Get details of a specific metric by its ID.
+    This endpoint returns the metric information including its name, unit, and call function.
+    """
     res = await session.execute(select(Metric).where(Metric.id==id))
     metric = res.scalar_one_or_none()
     if not metric:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Metric not found")
-    return {
-        "id": metric.id,
-        "name": metric.name,
-        "unit": metric.unit,
-        "call": metric.call,
-        "link": f"/metric/{metric.id}",
-    }
+    return metric
 
-@app.post("/metric/")
+@app.post("/metric/", response_model=Metric)
 # create new metric
 async def metric_new(metric: Metric, session: AsyncSession = Depends(get_async_session)):
+    """Create a new metric.
+    This endpoint allows you to create a new metric with a unique name, unit, and call function.
+    """
     session.add(metric)
     await session.commit()
     session.refresh(metric)
     return metric
 
-@app.post("/metric/{id}")
+@app.post("/metric/{id}", response_model=Metric)
+# edit metric
 async def metric_edit(id: int,
                      metric_data: Metric, session: AsyncSession = Depends(get_async_session)):
+    """Edit an existing metric by its ID.
+    This endpoint allows you to update the name, unit, and call function of a metric.
+    If the metric does not exist, it raises an error.
+    """
     res = await session.execute(select(Metric).where(Metric.id==id))
     metric = res.scalar_one_or_none()
     if not metric:
@@ -380,9 +465,13 @@ async def metric_edit(id: int,
     session.refresh(metric)
     return metric
 
-@app.delete("/metric/{id}")
+@app.delete("/metric/{id}", response_model=dict)
 # delete metric
 async def metric_delete(id: int, session: AsyncSession = Depends(get_async_session)):
+    """Delete a metric by its ID.
+    This endpoint removes the metric and all associated device type links.
+    If the metric does not exist, it raises an error.
+    """
     res = await session.execute(select(Metric).where(Metric.id==id))
     metric = res.scalar_one_or_none()
     if not metric:
@@ -391,9 +480,9 @@ async def metric_delete(id: int, session: AsyncSession = Depends(get_async_sessi
     await session.commit()
     return {"ok": True, "message": f"Metric {metric.name} deleted"}
 
-@app.get("/history/{device_id}/{metric_id}")
+@app.get("/history/{device_id}/{metric_id}", response_model=MeasuresHistory)
 # get measure history for device and metric
-async def measure_history(device_id: int, metric_id: int, session: AsyncSession = Depends(get_async_session)):
+async def measures_history(device_id: int, metric_id: int, session: AsyncSession = Depends(get_async_session)):
     res = await session.execute(select(Device).options(
         selectinload(Device.site), selectinload(Device.device_type)
     ).where(Device.id==device_id))
@@ -410,29 +499,32 @@ async def measure_history(device_id: int, metric_id: int, session: AsyncSession 
         .order_by(Measure.timestamp.desc())
     )
     measures = res.scalars().all()
-    return {
-        "device": { 
-            "id": device.id,
-            "name": device.name,
-            "link": f"/device/{device.id}",
-            "site": {"id": device.site.id, "name": device.site.name,
-                     "link": f"/site/{device.site.id}"},
-            "device_type": {"id": device.device_type.id, "name": device.device_type.name,
-                            "link": f"/device_type/{device.device_type.id}"}
-        },
-        "metric": { 
-            "id": metric.id,
-            "name": metric.name,
-            "unit": metric.unit,
-        },
-        "history": [
-            {
-                "value": measure.value,
-                "timestamp": measure.timestamp
-            }
+    return MeasuresHistory(
+        device=DeviceShort(
+            id=device.id,
+            name=device.name,
+            link=device.link,
+        ),
+        site=SiteShort(
+            id=device.site.id, name=device.site.name, link=device.site.link
+        ),
+        device_type=DeviceTypeShort(
+            id=device.device_type.id, name=device.device_type.name, link=device.device_type.link
+        ),
+        metric=MetricShort(
+            id=metric.id,
+            name=metric.name,
+            unit=metric.unit,
+            link=metric.link
+        ),
+        history=[
+            MeasureShort(
+                value=measure.value,
+                timestamp=measure.timestamp
+            )
             for measure in measures
         ]
-    }
+    )
 
 
 """
